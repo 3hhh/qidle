@@ -6,8 +6,8 @@ It can detect the user or VMs going idle and accordingly trigger user-defined ac
 
 Besides the obvious energy savings it is mostly intended to harden a Qubes OS host against memory [side-channel](https://en.wikipedia.org/wiki/Side-channel_attack) and other attacks originating from compromised VMs.
 
-The basic idea is:
-Halted Attacker VMs cannot attack and halted target VMs are harder to attack. So let's make an attacker's life harder by halting everything we don't need!
+The basic idea is:  
+Halted attacker VMs cannot attack and halted target VMs are harder to attack. So let's make an attacker's life harder by halting everything we don't need!
 
 ## Features
 
@@ -32,7 +32,7 @@ Therefore I decided to write this script.
 2. Download this repository with `git clone https://github.com/3hhh/qidle.git` or your browser and copy it to dom0.
 3. Move the repository to a directory of your liking.
 4. Symlink the `qidled` binary into your dom0 `PATH` for convenience, e.g. to `/usr/bin/`.
-5. Configure `qidled` at `/etc/qidled.conf`. A sample configuration is included in your repository copy. Copy that one to `/etc/qidled.conf` for a start.
+5. Configure `qidled` at `/etc/qidled.conf`. A [sample configuration](https://github.com/3hhh/qidle/blob/master/qidled.conf) is included in your repository copy. Copy that one to `/etc/qidled.conf` for a start.
 6. (Optional) Configure Qubes OS so that `qidled start` is run on autostart.
 
 ### A word of caution
@@ -49,7 +49,8 @@ You're installing something to dom0 after all.
 
 Execute `qidled` on the command-line to obtain an overview of its capabilities.
 
-The [sample configuration](https://github.com/3hhh/qidle/blob/master/qidled.conf) is a full-fledged bash file with lots of comments and should thus be mostly self-explanatory. Feel free to directly program your custom stuff inside your own configuration file. Happy hacking! :-)
+The [sample configuration](https://github.com/3hhh/qidle/blob/master/qidled.conf) is a full-fledged bash file with lots of comments and should thus be mostly self-explanatory. Feel free to directly program your custom stuff inside your own configuration file.  
+Happy hacking! :-)
 
 ## Uninstall
 
