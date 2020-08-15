@@ -1,0 +1,895 @@
+#!/bin/bash
+#
+#See usage().
+#
+#Copyright (C) 2020  David Hobach  GPLv3
+#version: 0.7
+#
+#This program is free software: you can redistribute it and/or modify
+#it under the terms of the GNU General Public License as published by
+#the Free Software Foundation, either version 3 of the License, or
+#(at your option) any later version.
+#
+#This program is distributed in the hope that it will be useful,
+#but WITHOUT ANY WARRANTY; without even the implied warranty of
+#MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#GNU General Public License for more details.
+#
+#You should have received a copy of the GNU General Public License
+#along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+
+#init blib
+source blib
+b_checkVersion 1 3 || { >&2 echo "This script depends on blib (https://github.com/3hhh/blib) version 1.3 or higher. Please install a supported version." ; exit 1 ; }
+eval "$B_SCRIPT"
+b_import "args"
+b_import "daemon"
+b_import "fs"
+b_import "wm"
+b_import "types"
+b_import "os/qubes4/dom0"
+
+#load config
+CONF_1="/etc/$B_SCRIPT_NAME.conf"
+CONF_2="$B_SCRIPT_DIR/$B_SCRIPT_NAME.conf"
+[ -f "$CONF_1" ] && CONF="$CONF_1" || CONF="$CONF_2"
+source "$CONF" || { B_ERR="Failed to load the configuration from $CONF. Make sure it exists at either $CONF_1 (preferred) or $CONF_2." ; B_E }
+
+#distinguish the B_E exit code from the "normal" error
+B_RC=6
+
+#daemon ID to uniquely identify the background process
+DID="$B_SCRIPT_NAME"
+
+#whether or not the daemon was initialized
+DAEMON_INIT_DONE=1
+
+#debug mode on/off switch (-v flag)
+DEBUG=1
+
+#maximum number of lines for the debug log to keep upon initialization
+DEBUG_LINES_MAX=100000
+
+#where to log stdout & stderr daemon output, if DEBUG=0
+DEBUG_OUT="$B_SCRIPT_DIR/qidled.log"
+DEBUG_ERR="$DEBUG_OUT"
+
+#no logging on/off switch (-q flag)
+QUIET=1
+
+#0 = the main loop should process events; everything else = it should exit
+PROCESS_EVENTS=0
+
+#ACTIVE_VMS: VM name --> 0 (0 = active, active means "not shut down"); inactive VMs are removed from the map
+declare -A ACTIVE_VMS=()
+
+#WIN_COUNTS: VM name --> number of active windows
+declare -A WIN_COUNTS=()
+
+#iteration ID of the last time WIN_COUNTS was updated
+LAST_WIN_COUNT_CHECK=-1
+
+#timeouts (user: simple var, VMs: vm --> timeout map)
+#initialized in code only
+TIMEOUT_USER=
+declare -A TIMEOUT_VMS=()
+
+#how often a VM was seen idle so far, but the idle event wasn't sent yet
+declare -A COUNTERS_VMS=()
+
+#number of idle events that were sent since the last non-idle event (for the second action argument)
+#[vm] --> count
+declare -A IDLE_EVENTS_VMS=()
+IDLE_EVENTS_USER=0
+
+#action caches
+#vm --> action
+declare -A CACHED_USER_ACTIONS=()
+declare -A CACHED_VM_ACTIONS=()
+
+#VM timeout cache
+#vm --> timeout
+declare -A CACHED_VM_TIMEOUTS=()
+
+function usage {
+echo "
+Usage: $B_SCRIPT_NAME [options] [command]
+
+Qubes OS dom0 daemon to execute an action whenever a VM or the user becomes idle.
+
+A VM is considered idle, if it doesn't have any active X server window (the default
+configuration excludes *-sys-* VMs from that rule) for a configurable amount of time. 
+
+The user is considered idle, if (sh)he did not perform any interaction with the
+X server for a configurable amount of time.
+
+The actions (usually VM pause or shutdown) are configurable and fully customizable
+in one of the following configuration files:
+
+$CONF_1
+$CONF_2
+
+They are called until the VM in question is shut down.
+
+[command] may be one of:
+
+start
+	Start the qidle daemon in the background.
+
+	Options:
+		-q  Do not log anything to the local syslog.
+		-v  Create debug output.
+
+stop
+	Stop the running qidle daemon.
+
+restart
+	Restart the qidle daemon. Configuration changes always require a daemon restart
+	to become effective.
+
+status
+	Check whether a qidle daemon is running in the background. Sets a zero exit code,
+	if the daemon is running and a non-zero exit code otherwise.
+
+triggerUserIdle
+	Trigger the actions that would be executed if the user were idle. The command can
+	be useful if you want to let other programs (e.g. the X server) decide whether the
+	user is idle or not, but let qidled execute the actions.
+	The daemon must run for it to execute.
+	Have a look at xflock4, if you want to trigger it in combination with your Qubes OS
+	screensaver.
+
+unpauseAllActiveWindows
+	Unpause all VMs with an active window. To unpause all VMs, use qvm-unpause --all.
+	If you use $B_SCRIPT_NAME to pause VMs on user idle events, this is a useful
+	command to wake up paused windows.
+	You may want to bind it to a hotkey or add it to your screensaver wake-up command.
+
+help
+	print this help"
+exit 1
+}
+
+#initLog [log target]
+#Initialize the given logging destination.
+#100% copy of a qcryptd function
+#returns: Nothing.
+#@B_E
+function initLog {
+local log="$1"
+
+#nothing to do for devices
+[ -f "$log" ] || return 0
+
+#files may require deletion, if too large
+local lc=
+lc="$(b_fs_getLineCount "$log")" || { B_ERR="Failed to obtain the line count of $log. Permission issues?!" ; B_E }
+if [ $lc -gt $DEBUG_LINES_MAX ] ; then
+	rm -f "$log" || { B_ERR="Failed to remove the file $log." ; B_E }
+fi
+
+return 0
+}
+
+#logError [message] [notify] [notification summary]
+#95% qcryptd copy.
+#[notify]: If set to 0, send a user notification as well (default: 1)
+function logError {
+local msg="$1"
+local notify="${2:-1}"
+local summary="${3:-"$B_SCRIPT_NAME: ERROR"}"
+#NOTE: we write to stderr (which is logged in debug mode) to avoid conflicts with echoed return values from inside functions
+[ $DEBUG -eq 0 ] && >&2 echo "$SECONDS [$BASHPID] ERROR: $msg"
+logger -p daemon.err -t "$B_SCRIPT_NAME" "[$BASHPID] $msg"
+if [ $notify -eq 0 ] ; then
+	notify-send -u critical -t 60000 "$summary" "$msg" &
+	disown
+fi
+return 0
+}
+
+#logInfo [message] [notify] [notification summary]
+#95% qcryptd copy.
+#[notify]: If set to 0, send a user notification as well (default: 1)
+function logInfo {
+local msg="$1"
+local notify="${2:-1}"
+local summary="${3:-"$B_SCRIPT_NAME: INFO"}"
+#NOTE: we write to stderr (which is logged in debug mode) to avoid conflicts with echoed return values from inside functions
+[ $DEBUG -eq 0 ] && >&2 echo "$SECONDS [$BASHPID] INFO: $msg"
+logger -p daemon.notice -t "$B_SCRIPT_NAME" "[$BASHPID] $msg"
+if [ $notify -eq 0 ] ; then
+	notify-send "$summary" "$msg" &
+	disown
+fi
+return 0
+}
+
+function logState {
+if [ $DEBUG -eq 0 ] ; then
+	echo $'\n'"STATE BEGIN"
+	logInfo "$(declare -p ACTIVE_VMS)"
+	logInfo "$(declare -p WIN_COUNTS)"
+	logInfo "$(declare -p LAST_WIN_COUNT_CHECK)"
+	logInfo "$(declare -p TIMEOUT_USER)"
+	logInfo "$(declare -p TIMEOUT_VMS)"
+	logInfo "$(declare -p COUNTERS_VMS)"
+	logInfo "$(declare -p CACHED_USER_ACTIONS)"
+	logInfo "$(declare -p CACHED_VM_ACTIONS)"
+	logInfo "$(declare -p CACHED_VM_TIMEOUTS)"
+	logInfo "$(declare -p IDLE_EVENTS_VMS)"
+	logInfo "$(declare -p IDLE_EVENTS_USER)"
+	echo "STATE END"$'\n'
+fi
+}
+
+#loggingDaemonErrorHandler [error out]
+#100% copy of a qcryptd function
+function loggingDaemonErrorHandler {
+local errorOut=${1:-0}
+
+#set the proper exit code
+if [ $errorOut -eq 0 ] ; then
+	#only the daemon itself should cause FATALs
+	if [ $BASHPID -eq $$ ] ; then
+		logState
+		logError "FATAL: $B_ERR" 0
+		logError "Daemon exiting..."
+	else
+		logError "$B_ERR Child thread exiting..."
+	fi
+	return 2
+else
+	logInfo "$B_ERR"
+	return 1
+fi
+}
+
+#shutdownDaemon
+#returns: Nothing. Never errors out.
+function shutdownDaemon {
+clearTraps
+PROCESS_EVENTS=1
+
+logInfo "Received request to shut down."
+b_dom0_disconnectEventLoop
+logInfo "$(date) Stopped."
+}
+
+function clearTraps {
+trap - EXIT
+trap - SIGUSR1
+trap - SIGUSR2
+}
+
+function initTraps {
+trap 'shutdownDaemon' EXIT
+trap 'shutdownDaemon' SIGUSR2
+
+#ignore Ctrl-C etc. inside the daemon (this overwrites parts of the exit trap above)
+trap '' SIGTERM SIGINT SIGQUIT SIGHUP
+
+#NOTE: we execute it in a subshell in order to never make the daemon error out (with e.g. B_E)
+trap '(handleUserIdle "$IDLE_EVENTS_USER"); IDLE_EVENTS_USER=$(( $IDLE_EVENTS_USER +1 ))' SIGUSR1
+}
+
+#initializeActiveVMs
+#Initialize the ACTIVE_VMS map with the currently active VMs.
+#returns: A zero exit code on success and a non-zero exit code otherwise. Unexpected errors will trigger [B_E](#B_E).
+#@B_E
+#@StateChanging
+function initializeActiveVMs {
+local running=
+running="$(qvm-ls --running --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E }
+
+local vm=
+while IFS= read -r vm ; do
+	[ -z "$vm" ] && continue
+	[[ "$vm" == "dom0" ]] && continue
+	ACTIVE_VMS["$vm"]=0
+done <<< "$running"
+
+return 0
+}
+
+#daemon main loop
+function daemon_main {
+b_setErrorHandler "loggingDaemonErrorHandler"
+initTraps
+logInfo "Starting..."
+b_dom0_enterEventLoop "onQubesEvent" 1000
+}
+
+#getVMTimeout [vm]
+#Retrieve the useer-defined timeout for a given VM. The cache must be updated externally.
+#[vm]: VM
+#returns: Timeout in seconds. Never errors out (errors are logged only).
+function getVMTimeout {
+local vm="$1"
+
+if [ ${CACHED_VM_TIMEOUTS["$vm"]+exists} ] ; then
+	echo "${CACHED_VM_TIMEOUTS["$vm"]}"
+else
+	local ret=
+
+	local rlist=
+	rlist="$(sortArgRegexes "${!VM_TIMEOUT[@]}")" || logError "getVMTimeout(): Failed to sort."
+
+	local line=
+	while IFS= read -r line ; do
+		re="$(getRegex "$line")" || logError "getVMTimeout(): Failed to retrieve the regex from the line $line."
+		if [[ "$vm" =~ $re ]] ; then
+			ret="${VM_TIMEOUT["$line"]}"
+			[ $DEBUG -eq 0 ] && logInfo "getVMTimeout(): Found ${ret}s idle time for the VM $vm (line: $line)..."
+			break
+		fi
+	done <<< "$rlist"
+
+	echo "$ret"
+fi
+}
+
+#initializeVMTimeout [vm] [counter reset]
+#Initialize the timeout variables for the given VM.
+#[vm]: VM
+#[counter reset]: also reset the counters (default: 0/true)
+#Assumes that the VM "just got active".
+#returns: Nothing. Never errors out.
+function initializeVMTimeout {
+local vm="$1"
+local creset="${2:-0}"
+local vm_timeout="$(getVMTimeout "$vm")"
+CACHED_VM_TIMEOUTS["$vm"]="$vm_timeout"
+TIMEOUT_VMS["$vm"]=$(( $vm_timeout / $VM_CHECKS ))
+if [ $creset -eq 0 ] ; then
+	COUNTERS_VMS["$vm"]=0
+	IDLE_EVENTS_VMS["$vm"]=0
+fi
+return 0
+}
+
+#clearVMTimeout [vm]
+#Clear the timeout variables for the given VM.
+#returns: Nothing.
+function clearVMTimeout {
+local vm="$1"
+unset TIMEOUT_VMS["$vm"]
+unset COUNTERS_VMS["$vm"]
+unset IDLE_EVENTS_VMS["$vm"]
+}
+
+#updateUserTimeout
+#Update the user timeout variables.
+#It'll also initialize with the correct timeouts even if the user may have been inactive for a while already.
+#returns: Nothing.
+#@B_E
+function updateUserTimeout {
+local xidle=
+xidle="$(xssstate -i)" || { B_ERR="Failed to execute xssstate." ; B_E }
+xidle=$(( $xidle / 1000 ))
+TIMEOUT_USER=$(( $USER_TIMEOUT - $xidle ))
+
+#update IDLE_EVENTS_USER, if the user was active during the last period
+[ $xidle -lt $USER_TIMEOUT ] && IDLE_EVENTS_USER=0
+
+return 0
+}
+
+#initializeTimeouts
+#Init all timeout variables.
+#returns: Nothing.
+#@B_E
+function initializeTimeouts {
+userIdleEnabled && updateUserTimeout
+
+if vmIdleEnabled ; then
+	local vm=
+	for vm in ${!ACTIVE_VMS[@]} ; do
+		initializeVMTimeout "$vm"
+	done
+fi
+return 0
+}
+
+#sortArgRegexes [arg 1] ... [arg n]
+#Sort all given regexes according to their [index] order.
+#returns: List of the given args in the correct order. A non-zero exit code indicates failure.
+function sortArgRegexes {
+local arg=
+for arg in "$@" ; do echo "$arg" ; done | sort -g
+}
+
+#getRegex [line]
+#[line]: Line to retrieve the regex from, in [index]: [regex] format.
+#returns: The [regex].
+#@B_E
+function getRegex {
+local line="$1"
+local re='^[0-9]+\: (.*)$'
+[[ "$line" =~ $re ]] || { B_ERR="Could not retrieve the regex from the line $line." ; B_E }
+echo "${BASH_REMATCH[1]}"
+}
+
+#handleUserIdle [counter]
+#Handle a "user is idle" signal.
+#[counter]: How often this function was called since the last non-idle event.
+#returns: The sum of exit codes of the executed actions. Only other (unexpected) errors may trigger [B_E](#B_E).
+#@B_E
+function handleUserIdle {
+local cnt="$1"
+local vm=
+local ret=0
+
+for vm in "${!ACTIVE_VMS[@]}" ; do
+	local action=""
+
+	if [ ${CACHED_USER_ACTIONS["$vm"]+exists} ] ; then
+		action="${CACHED_USER_ACTIONS["$vm"]}"
+	else
+		local re=
+
+		#check excludes
+		local ignore=1
+		for re in "${USER_IDLE_EXCLUDE[@]}" ; do
+			if [[ "$vm" =~ $re ]] ; then
+				[ $DEBUG -eq 0 ] && logInfo "handleUserIdle(): Ignoring the VM $vm due to the regex ${re}..."
+				ignore=0
+				break
+			fi
+		done
+
+		#check includes
+		if [ $ignore -ne 0 ] ; then
+			local rlist=
+			rlist="$(sortArgRegexes "${!USER_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
+
+			local line=
+			while IFS= read -r line ; do
+				re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
+				if [[ "$vm" =~ $re ]] ; then
+					action="${USER_IDLE["$line"]}"
+					[ $DEBUG -eq 0 ] && logInfo "handleUserIdle(): Found the action $action for the VM $vm (line: $line)..."
+					break
+				fi
+			done <<< "$rlist"
+		fi
+
+		#update cache
+		CACHED_USER_ACTIONS["$vm"]="$action"
+	fi
+
+	execAction "user" "$action" "$vm" "$cnt"
+	ret=$(( $ret + $? ))
+done
+
+return $ret
+}
+
+#execAction [action type] [action] [arg 1] ... [arg n]
+#Execute the given action.
+#[action type]: String describing the action type (user|VM).
+#[action]: Command or function to execute.
+#[arg i]: Additional arguments to pass to the action.
+#returns: The exit code of the action.
+function execAction {
+local atype="$1"
+local action="$2"
+shift 2
+local ret=
+local vm="$1"
+local cnt="$2"
+
+[ -z "$action" ] && return 0
+
+logInfo "Executing the $atype idle action for the VM $vm: $action (count: $cnt)"
+local arg=
+local esc=
+for arg in "$@" ; do
+	printf -v esc '%s %q' "$esc" "$arg"
+done
+#NOTE: we execute inside a subshell to prevent the user from crashing the main daemon with some ugly code and to not let him manipulate the daemon internals during runtime
+( eval "$action $esc" )
+ret=$?
+[ $ret -ne 0 ] && logError "Failed to execute the $atype idle action for the VM $vm: $action (count: $cnt)"
+return $ret
+}
+
+#handleVMIdle [vm] [counter]
+#Handle a "VM is idle" signal.
+#[vm]: The VM that just became idle. Assumed to be running.
+#[counter]: How often this function was called since the last non-idle event.
+#returns: The exit code of the executed action. Only other (unexpected) errors may trigger [B_E](#B_E).
+#@B_E
+function handleVMIdle {
+local vm="$1"
+local cnt="$2"
+local ret=0
+local action=""
+
+if [ ${CACHED_VM_ACTIONS["$vm"]+exists} ] ; then
+	action="${CACHED_VM_ACTIONS["$vm"]}"
+else
+	local re=
+
+	#check excludes
+	local ignore=1
+	for re in "${VM_IDLE_EXCLUDE[@]}" ; do
+		if [[ "$vm" =~ $re ]] ; then
+			[ $DEBUG -eq 0 ] && logInfo "handleVMIdle(): Ignoring the VM $vm due to the regex ${re}..."
+			ignore=0
+			break
+		fi
+	done
+
+	#check includes
+	if [ $ignore -ne 0 ] ; then
+		local rlist=
+		rlist="$(sortArgRegexes "${!VM_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
+
+		local line=
+		while IFS= read -r line ; do
+			re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
+			if [[ "$vm" =~ $re ]] ; then
+				action="${VM_IDLE["$line"]}"
+				[ $DEBUG -eq 0 ] && logInfo "handleVMIdle(): Found the action $action for the VM $vm (line: $line)..."
+				break
+			fi
+		done <<< "$rlist"
+	fi
+
+	#update cache
+	CACHED_VM_ACTIONS["$vm"]="$action"
+fi
+
+execAction "VM" "$action" "$vm" "$cnt"
+}
+
+#tickUserTimeout [id]
+#Decrease the user timeout by 1 and handle the timeout reaching zero, if necessary.
+#[id]: ID of the current iteration.
+#returns: A zero exit code indicates that a timeout was reached and correctly handled. Otherwise (incl. unexpected errors) a non-zero exit code is set. Never errors out.
+function tickUserTimeout {
+TIMEOUT_USER=$(( $TIMEOUT_USER -1 ))
+
+local ret=1
+if [ $TIMEOUT_USER -le 0 ] ; then
+	b_setBE 1
+
+	#check whether still idle
+	updateUserTimeout
+
+	if [ $TIMEOUT_USER -le 0 ] ; then
+		if handleUserIdle "$IDLE_EVENTS_USER" ; then
+			logInfo "User idle seen (count: $IDLE_EVENTS_USER)."
+			ret=0
+		else
+			logError "Failed to handle a user idle event (count: $IDLE_EVENTS_USER)."
+			ret=2
+		fi
+		IDLE_EVENTS_USER=$(( $IDLE_EVENTS_USER +1 ))
+
+		#always continue (users may choose not to do anything on subsequent action calls by using the counter)
+		TIMEOUT_USER=$USER_TIMEOUT
+	fi
+
+	b_resetErrorHandler 1
+	if [ -n "$B_ERR" ] ; then
+		logError "$B_ERR"
+		B_ERR=""
+		ret=3
+	fi
+fi
+
+return $ret
+}
+
+#updateWindowCounts
+#Update the WIN_COUNTS variable.
+#returns: Nothing.
+#@B_E
+function updateWindowCounts {
+local out=
+out="$(b_wm_getActiveWindowProperties "wprops")" || { B_ERR="Failed to retrieve the X window properties." ; B_E }
+eval "$out"
+
+#clear
+unset WIN_COUNTS
+declare -gA WIN_COUNTS=()
+
+local key=
+local re='^_QUBES_VMNAME = "(.*)"$'
+for key in "${!wprops[@]}" ; do
+	if [[ "$key" == *"_id" ]] ; then
+		local wid="${wprops["$key"]}"
+
+		local client="${wprops["${wid}_client"]}"
+		[[ "$client" == "dom0" ]] && continue
+
+		#don't count small windows
+		[ -z "${wprops["${wid}_width"]}" ] && continue
+		[ -z "${wprops["${wid}_height"]}" ] && continue
+		[ ${wprops["${wid}_width"]} -lt $MIN_WINDOW_WIDTH ] && continue
+		[ ${wprops["${wid}_height"]} -lt $MIN_WINDOW_HEIGHT ] && continue
+
+		local xprop=
+		xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" || continue #NOTE: as the window may have been closed in the meantime, we ignore errors
+
+		[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E }
+		local vm="${BASH_REMATCH[1]}"
+		WIN_COUNTS["$vm"]=$(( ${WIN_COUNTS["$vm"]:-0} +1 ))
+	fi
+done
+
+return 0
+}
+
+#checkVMIdle [id] [vm]
+#Check whether the given VM is currently idle or not.
+#[id]: ID of the current iteration.
+#[vm]: VM to check
+#returns: Sets a zero exit code, if and only if the given VM is currently idle.
+#@B_E
+function checkVMIdle {
+local id="$1"
+local vm="$2"
+
+[[ $LAST_WIN_COUNT_CHECK != "$id" ]] && updateWindowCounts && LAST_WIN_COUNT_CHECK="$id"
+
+local cnt=${WIN_COUNTS["$vm"]}
+[ -z $cnt ] || [ $cnt -eq 0 ]
+}
+
+#tickVMTimeout [iter id] [vm]
+#Decrease the VM timeout by 1 and handle the timeout reaching zero, if necessary.
+#[id]: ID of the current iteration.
+#[vm]: The VM. Assumed to be running.
+#returns: A zero exit code indicates that a timeout was reached and correctly handled. Otherwise (incl. unexpected errors) a non-zero exit code is set. Never errors out.
+function tickVMTimeout {
+local id="$1"
+local vm="$2"
+
+TIMEOUT_VMS[$vm]=$(( ${TIMEOUT_VMS[$vm]} -1 ))
+
+local ret=1
+if [ ${TIMEOUT_VMS[$vm]} -le 0 ] ; then
+	b_setBE 1
+
+	if checkVMIdle "$id" "$vm" ; then
+		COUNTERS_VMS["$vm"]=$(( ${COUNTERS_VMS["$vm"]:-0} +1 ))
+		if [ ${COUNTERS_VMS["$vm"]} -ge $VM_CHECKS ] ; then
+			if handleVMIdle "$vm" "${IDLE_EVENTS_VMS["$vm"]}" ; then
+				logInfo "$vm VM idle seen (count: ${IDLE_EVENTS_VMS["$vm"]})."
+				#NOTE: we do not clear the timeouts as that won't stop the tick anyway (only inactive VMs will not have a related tick)
+				initializeVMTimeout "$vm" 1
+				COUNTERS_VMS["$vm"]=0
+				ret=0
+			else
+				logError "Failed to handle a VM idle event for the $vm VM (count: ${IDLE_EVENTS_VMS["$vm"]}). Retrying soon..."
+				#wait for next timeout round
+				initializeVMTimeout "$vm" 1
+				ret=3
+			fi
+			IDLE_EVENTS_VMS["$vm"]=$(( ${IDLE_EVENTS_VMS["$vm"]} +1 ))
+		else
+			#timeout reached, but counter not high enough
+			initializeVMTimeout "$vm" 1
+			ret=1
+		fi
+	else
+		#reset timeout & counter
+		[ $? -ne $B_RC ] && initializeVMTimeout "$vm"
+		ret=2
+	fi
+
+	b_resetErrorHandler 1
+	if [ -n "$B_ERR" ] ; then
+		logError "$B_ERR"
+		B_ERR=""
+		ret=4
+	fi
+fi
+
+return $ret
+}
+
+#userIdleEnabled
+#Test whether the user idle mode is enabled or not.
+#returns: Only sets a zero exit code, if it is enabled.
+function userIdleEnabled {
+[ $USER_TIMEOUT -gt 0 ]
+}
+
+#vmIdleEnabled
+#Test whether the VM idle mode is enabled or not.
+#returns: Only sets a zero exit code, if it is enabled.
+function vmIdleEnabled {
+[ $VM_CHECKS -gt 0 ] && [ ${#VM_TIMEOUT[@]} -gt 0 ]
+}
+
+#tickTimeouts
+#Decrease all timeouts by 1 and handle timeouts reaching zero, if necessary.
+#returns: Nothing. Never errors out.
+function tickTimeouts {
+local id=$RANDOM
+
+if vmIdleEnabled ; then
+	local vm=
+	for vm in ${!ACTIVE_VMS[@]} ; do
+		tickVMTimeout "$id" "$vm"
+	done
+fi
+
+userIdleEnabled && tickUserTimeout "$id"
+return 0
+}
+
+#onQubesEvent [subject] [event name] [event info] [timestamp]
+#Called for every Qubes OS event.
+#[subject]: The subject name Qubes OS provides. Usually the VM for which the event was reported. 'None' appears to mean 'dom0'.
+#[event name]: Name of the event for which the callback function was called.
+#[event info]: May contain additional information about the event (e.g. arguments).
+#[timestamp]: When the event was received in ms since EPOCH.
+#returns: Nothing. A non-zero exit code will abort further processing.
+function onQubesEvent {
+local vm="$1"
+local eventName="$2"
+local eventInfo="$3"
+local timeSeconds="${4:0:10}"
+
+[ $PROCESS_EVENTS -ne 0 ] && return $PROCESS_EVENTS
+
+#init if necessary
+#NOTE: some things require initialization _in_ the event loop as we might otherwise lose events in the meantime
+if [ $DAEMON_INIT_DONE -ne 0 ] ; then
+	logInfo "$(date) Initializing..."
+	initializeActiveVMs
+	initializeTimeouts
+
+	logInfo "Initialized."
+	logState
+	DAEMON_INIT_DONE=0
+fi
+
+handleQubesEvent "$vm" "$eventName" "$eventInfo" "$timeSeconds" || return $?
+return 0
+}
+
+#+handleQubesEvent [subject] [event name] [event info] [timestamp in seconds]
+#+Handles Qubes events for [onQubesEvent](#onQubesEvent).
+#+returns: Nothing.
+function handleQubesEvent {
+local vm="$1"
+local eventName="$2"
+local timeSeconds="$4"
+
+# algorithm sketch:
+# while listening to Qubes event loop:
+#	once: init VM --> current timeout map & user timeout var & map of actions per VM
+#		timeout var = T/c with c being a configurable counter (user: c=1, VMs: c=2 by default) and T the overall time over which it should be seen idle
+#		T = VM_TIMEOUT of the matching VM, c = VM_CHECKS
+#	on domain unpause --> add to timeout map (unpause is triggered on start & unpause)
+#	on domain shutdown --> remove from timeout map
+#	on heartbeat:
+#		if a timeout var <= 0:
+#			update timeout vars/maps (user idle status and/or VM idle status)
+#		if a timeout var still <= 0:
+#			execute action, if seen idle > c times (idle check is only "is it idle right now" for VMs --> check c times to be sure)
+#			set timeout back to initial (in case the action didn't shut down or pause)
+
+#handle the current event
+#NOTE: none of the below functions can error out with B_E by design
+case "$eventName" in
+	#VM started OR unpaused
+	"domain-unpaused")
+		ACTIVE_VMS["$vm"]=0
+		vmIdleEnabled && initializeVMTimeout "$vm"
+		;;
+	#VM stopped (triggered on shutdown & kill)
+	"domain-shutdown")
+		unset ACTIVE_VMS["$vm"]
+		vmIdleEnabled && clearVMTimeout "$vm"
+		;;
+	"heartbeat")
+		tickTimeouts
+		;;
+	*)
+		return 0
+esac
+
+#some debug info
+if [ $DEBUG -eq 0 ] && [[ "$eventName" != "heartbeat" ]] ; then
+	logInfo "$vm: $eventName"
+	logState
+fi
+
+return 0
+}
+
+#unpauseAllActiveWindows
+#Unpause all VMs that have an active window.
+#returns: Nothing.
+#@B_E
+function unpauseAllActiveWindows {
+local paused=
+paused="$(qvm-ls --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E }
+
+updateWindowCounts
+
+local vm=
+while IFS= read -r vm ; do
+	[ -z "$vm" ] && continue
+	[[ "$vm" == "dom0" ]] && continue
+
+	local cnt="${WIN_COUNTS["$vm"]}"
+	if [ -n "$cnt" ] && [ $cnt -gt 0 ] ; then
+		qvm-unpause "$vm" && b_info "Unpaused: $vm" || { B_ERR="Failed to unpause the VM $vm." ; B_E }
+	fi
+done <<< "$paused"
+}
+
+#assertValidConfig
+#Check whether the config is valid and if not, error out.
+#returns: Nothing.
+#@B_E
+function assertValidConfig {
+b_types_assertLooksLikeMap "$(declare -p VM_TIMEOUT)" "Invalid VM_TIMEOUT."
+b_types_assertInteger "$VM_CHECKS" "Invalid VM_CHECKS."
+b_types_assertLooksLikeMap "$(declare -p VM_IDLE)" "Invalid VM_IDLE."
+b_types_assertLooksLikeArray "$(declare -p VM_IDLE_EXCLUDE)" "Invalid VM_IDLE_EXCLUDE."
+b_types_assertInteger "$USER_TIMEOUT" "Invalid USER_TIMEOUT."
+b_types_assertLooksLikeMap "$(declare -p USER_IDLE)" "Invalid USER_IDLE."
+b_types_assertLooksLikeArray "$(declare -p USER_IDLE_EXCLUDE)" "Invalid USER_IDLE_EXCLUDE."
+b_types_assertInteger "$MIN_WINDOW_WIDTH" "Invalid MIN_WINDOW_WIDTH."
+b_types_assertInteger "$MIN_WINDOW_HEIGHT" "Invalid MIN_WINDOW_HEIGHT."
+}
+
+
+b_deps "date" "qvm-ls" "logger" "notify-send" "xssstate" "xprop" "qvm-unpause" "sort"
+b_args_parse "$@"
+[ $(b_args_getCount) -eq 1 ] || usage
+
+if b_args_getOption "-v" > /dev/null ; then
+	DEBUG=0
+	initLog "$DEBUG_OUT"
+	initLog "$DEBUG_ERR"
+	b_daemon_init 1 "" "$DEBUG_OUT" "$DEBUG_ERR"
+else
+	DEBUG=1
+	b_daemon_init 1
+fi
+b_args_getOption "-q" > /dev/null && QUIET=0
+
+case "$(b_args_get 0)" in
+	"start")
+		assertValidConfig
+		b_args_assertOptions "-v" "-q"
+		b_daemon_start "$DID"
+		;;
+	"stop")
+		b_args_assertOptions
+		b_daemon_stop "$DID" "SIGUSR2" 15
+		;;
+	"restart")
+		assertValidConfig
+		b_args_assertOptions "-v" "-q"
+		b_daemon_stop "$DID" "SIGUSR2" 15
+		b_daemon_start "$DID"
+		;;
+	"status")
+		b_args_assertOptions
+		b_daemon_status "$DID"
+		exit $?
+		;;
+	"triggerUserIdle")
+		b_args_assertOptions
+		b_daemon_sendSignal "$DID" "SIGUSR1" || { B_ERR="Daemon not running." ; B_E }
+		;;
+	"unpauseAllActiveWindows")
+		b_args_assertOptions
+		unpauseAllActiveWindows
+		;;
+	*)
+		usage
+		;;
+esac
