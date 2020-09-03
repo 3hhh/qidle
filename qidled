@@ -823,7 +823,15 @@ while IFS= read -r vm ; do
 
 	local cnt="${WIN_COUNTS["$vm"]}"
 	if [ -n "$cnt" ] && [ $cnt -gt 0 ] ; then
-		qvm-unpause "$vm" && b_info "Unpaused: $vm" || { B_ERR="Failed to unpause the VM $vm." ; B_E }
+		if qvm-unpause "$vm" &> /dev/null ; then
+			#the qubes-gui-agent restart & clock sync is a hotfix for https://github.com/QubesOS/qubes-issues/issues/5988
+			#note that the VM may block the below `qvm-run` indefinitely, but this function is not running inside the daemon anyway
+			[[ "$vm" != "disp"* ]] && qvm-run -u root -n --nogui "$vm" "qvm-sync-clock ; systemctl restart qubes-gui-agent" &> /dev/null < /dev/null
+			b_info "Unpaused: $vm"
+		else
+			B_ERR="Failed to unpause the VM $vm."
+			B_E
+		fi
 	fi
 done <<< "$paused"
 }
@@ -845,7 +853,7 @@ b_types_assertInteger "$MIN_WINDOW_HEIGHT" "Invalid MIN_WINDOW_HEIGHT."
 }
 
 
-b_deps "date" "qvm-ls" "logger" "notify-send" "xssstate" "xprop" "qvm-unpause" "sort"
+b_deps "date" "qvm-ls" "logger" "notify-send" "xssstate" "xprop" "qvm-unpause" "qvm-run" "sort"
 b_args_parse "$@"
 [ $(b_args_getCount) -eq 1 ] || usage
 
