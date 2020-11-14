@@ -557,7 +557,7 @@ if [ $TIMEOUT_USER -le 0 ] ; then
 	b_setBE 1
 
 	#check whether still idle
-	updateUserTimeout
+	updateUserTimeout || { TIMEOUT_USER=10 ; logError "Failed to update the user timeout. Retrying again in $TIMEOUT_USER seconds..." ; }
 
 	if [ $TIMEOUT_USER -le 0 ] ; then
 		if handleUserIdle "$IDLE_EVENTS_USER" ; then
