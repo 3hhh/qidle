@@ -33,7 +33,7 @@ Therefore I decided to write this script.
 3. Move the repository to a directory of your liking.
 4. Symlink the `qidled` binary into your dom0 `PATH` for convenience, e.g. to `/usr/bin/`.
 5. Configure `qidled` at `/etc/qidled.conf`. A [sample configuration](https://github.com/3hhh/qidle/blob/master/qidled.conf) is included in your repository copy. Copy that one to `/etc/qidled.conf` for a start.
-6. (Optional) Configure Qubes OS so that `qidled start` is run on autostart.
+6. (Optional) Configure Qubes OS so that `qidled start` is run on autostart by the X server user.
 
 ### A word of caution
 
