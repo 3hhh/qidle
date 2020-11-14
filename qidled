@@ -852,6 +852,17 @@ b_types_assertInteger "$MIN_WINDOW_WIDTH" "Invalid MIN_WINDOW_WIDTH."
 b_types_assertInteger "$MIN_WINDOW_HEIGHT" "Invalid MIN_WINDOW_HEIGHT."
 }
 
+#assertXUser
+#Check whther the current user has access to the X server and if not, error out.
+#returns: Nothing.
+#@B_E
+function assertXUser {
+local user=
+user="$(whoami)" || { B_ERR="Failed to obtain the current user." ; B_E }
+#NOTE: Qubes OS is a single-user system so every user != root is currently fine.
+#maybe TODO: more properly check whether the user is a X server user anyway
+[[ "$user" != "root" ]] || { B_ERR="This script must have access to the X server, but the user $user does not have access to it." ; B_E }
+}
 
 b_deps "date" "qvm-ls" "logger" "notify-send" "xssstate" "xprop" "qvm-unpause" "qvm-run" "sort"
 b_args_parse "$@"
@@ -870,6 +881,7 @@ b_args_getOption "-q" > /dev/null && QUIET=0
 
 case "$(b_args_get 0)" in
 	"start")
+		assertXUser
 		assertValidConfig
 		b_args_assertOptions "-v" "-q"
 		b_daemon_start "$DID"
@@ -879,6 +891,7 @@ case "$(b_args_get 0)" in
 		b_daemon_stop "$DID" "SIGUSR2" 15
 		;;
 	"restart")
+		assertXUser
 		assertValidConfig
 		b_args_assertOptions "-v" "-q"
 		b_daemon_stop "$DID" "SIGUSR2" 15
@@ -894,6 +907,7 @@ case "$(b_args_get 0)" in
 		b_daemon_sendSignal "$DID" "SIGUSR1" || { B_ERR="Daemon not running." ; B_E }
 		;;
 	"unpauseAllActiveWindows")
+		assertXUser
 		b_args_assertOptions
 		unpauseAllActiveWindows
 		;;
