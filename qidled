@@ -2,8 +2,8 @@
 #
 #See usage().
 #
-#Copyright (C) 2020  David Hobach  GPLv3
-#version: 0.8
+#Copyright (C) 2021  David Hobach  GPLv3
+#version: 0.9
 #
 #This program is free software: you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -290,7 +290,6 @@ running="$(qvm-ls --running --paused -O NAME --raw-list)" || { B_ERR="Faled to e
 local vm=
 while IFS= read -r vm ; do
 	[ -z "$vm" ] && continue
-	[[ "$vm" == "dom0" ]] && continue
 	ACTIVE_VMS["$vm"]=0
 done <<< "$running"
 
@@ -608,7 +607,6 @@ for key in "${!wprops[@]}" ; do
 		local wid="${wprops["$key"]}"
 
 		local client="${wprops["${wid}_client"]}"
-		[[ "$client" == "dom0" ]] && continue
 
 		#don't count small windows
 		[ -z "${wprops["${wid}_width"]}" ] && continue
@@ -616,11 +614,15 @@ for key in "${!wprops[@]}" ; do
 		[ ${wprops["${wid}_width"]} -lt $MIN_WINDOW_WIDTH ] && continue
 		[ ${wprops["${wid}_height"]} -lt $MIN_WINDOW_HEIGHT ] && continue
 
-		local xprop=
-		xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" || continue #NOTE: as the window may have been closed in the meantime, we ignore errors
+		if [[ "$client" == "dom0" ]] ; then
+			local vm="dom0"
+		else
+			local xprop=
+			xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" || continue #NOTE: as the window may have been closed in the meantime, we ignore errors
 
-		[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E }
-		local vm="${BASH_REMATCH[1]}"
+			[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E }
+			local vm="${BASH_REMATCH[1]}"
+		fi
 		WIN_COUNTS["$vm"]=$(( ${WIN_COUNTS["$vm"]:-0} +1 ))
 	fi
 done
