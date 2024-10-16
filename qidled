@@ -21,7 +21,7 @@
 
 #init blib
 source blib
-b_checkVersion 1 3 || { >&2 echo "This script depends on blib (https://github.com/3hhh/blib) version 1.3 or higher. Please install a supported version." ; exit 1 ; }
+b_checkVersion 1 6 || { >&2 echo "This script depends on blib (https://github.com/3hhh/blib) version 1.6 or higher. Please install a supported version." ; exit 1 ; }
 eval "$B_SCRIPT"
 b_import "args"
 b_import "daemon"
@@ -288,7 +288,7 @@ local running=
 running="$(qvm-ls --running --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E }
 
 local vm=
-while IFS= read -r vm ; do
+while b_readLine vm ; do
 	[ -z "$vm" ] && continue
 	ACTIVE_VMS["$vm"]=0
 done <<< "$running"
@@ -320,7 +320,7 @@ else
 	rlist="$(sortArgRegexes "${!VM_TIMEOUT[@]}")" || logError "getVMTimeout(): Failed to sort."
 
 	local line=
-	while IFS= read -r line ; do
+	while b_readLine line ; do
 		re="$(getRegex "$line")" || logError "getVMTimeout(): Failed to retrieve the regex from the line $line."
 		if [[ "$vm" =~ $re ]] ; then
 			ret="${VM_TIMEOUT["$line"]}"
@@ -448,7 +448,7 @@ for vm in "${!ACTIVE_VMS[@]}" ; do
 			rlist="$(sortArgRegexes "${!USER_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
 
 			local line=
-			while IFS= read -r line ; do
+			while b_readLine line ; do
 				re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
 				if [[ "$vm" =~ $re ]] ; then
 					action="${USER_IDLE["$line"]}"
@@ -531,7 +531,7 @@ else
 		rlist="$(sortArgRegexes "${!VM_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
 
 		local line=
-		while IFS= read -r line ; do
+		while b_readLine line ; do
 			re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
 			if [[ "$vm" =~ $re ]] ; then
 				action="${VM_IDLE["$line"]}"
@@ -823,7 +823,7 @@ paused="$(qvm-ls --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-
 updateWindowCounts
 
 local vm=
-while IFS= read -r vm ; do
+while b_readLine vm ; do
 	[ -z "$vm" ] && continue
 	[[ "$vm" == "dom0" ]] && continue
 
