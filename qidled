@@ -2,8 +2,8 @@
 #
 #See usage().
 #
-#Copyright (C) 2021  David Hobach  GPLv3
-#version: 0.9
+#Copyright (C) 2026  David Hobach  GPLv3
+#version: 1.0
 #
 #This program is free software: you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -357,9 +357,9 @@ return 0
 #returns: Nothing.
 function clearVMTimeout {
 local vm="$1"
-unset TIMEOUT_VMS["$vm"]
-unset COUNTERS_VMS["$vm"]
-unset IDLE_EVENTS_VMS["$vm"]
+unset 'TIMEOUT_VMS["$vm"]'
+unset 'COUNTERS_VMS["$vm"]'
+unset 'IDLE_EVENTS_VMS["$vm"]'
 }
 
 #updateUserTimeout
@@ -388,7 +388,7 @@ userIdleEnabled && updateUserTimeout
 
 if vmIdleEnabled ; then
 	local vm=
-	for vm in ${!ACTIVE_VMS[@]} ; do
+	for vm in "${!ACTIVE_VMS[@]}" ; do
 		initializeVMTimeout "$vm"
 	done
 fi
@@ -606,8 +606,6 @@ for key in "${!wprops[@]}" ; do
 	if [[ "$key" == *"_id" ]] ; then
 		local wid="${wprops["$key"]}"
 
-		local client="${wprops["${wid}_client"]}"
-
 		#don't count small windows
 		[ -z "${wprops["${wid}_width"]}" ] && continue
 		[ -z "${wprops["${wid}_height"]}" ] && continue
@@ -719,7 +717,7 @@ local id=$RANDOM
 
 if vmIdleEnabled ; then
 	local vm=
-	for vm in ${!ACTIVE_VMS[@]} ; do
+	for vm in "${!ACTIVE_VMS[@]}" ; do
 		tickVMTimeout "$id" "$vm"
 	done
 fi
@@ -791,7 +789,7 @@ case "$eventName" in
 		;;
 	#VM stopped (triggered on shutdown & kill)
 	"domain-shutdown")
-		unset ACTIVE_VMS["$vm"]
+		unset 'ACTIVE_VMS["$vm"]'
 		vmIdleEnabled && clearVMTimeout "$vm"
 		;;
 	"heartbeat")
@@ -882,7 +880,7 @@ fi
 
 b_deps "date" "qvm-ls" "logger" "xssstate" "xprop" "qvm-unpause" "qvm-run" "sort"
 b_args_parse "$@"
-[ $(b_args_getCount) -eq 1 ] || usage
+[ "$(b_args_getCount)" -eq 1 ] || usage
 
 if b_args_getOption "-v" > /dev/null ; then
 	DEBUG=0
