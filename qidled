@@ -21,7 +21,7 @@
 
 #init blib
 source blib
-b_checkVersion 1 6 || { >&2 echo "This script depends on blib (https://github.com/3hhh/blib) version 1.6 or higher. Please install a supported version." ; exit 1 ; }
+b_checkVersion 1 7 || { >&2 echo "This script depends on blib (https://github.com/3hhh/blib) version 1.7 or higher. Please install a supported version." ; exit 1 ; }
 eval "$B_SCRIPT"
 b_import "args"
 b_import "daemon"
@@ -614,14 +614,12 @@ for key in "${!wprops[@]}" ; do
 		[ ${wprops["${wid}_width"]} -lt $MIN_WINDOW_WIDTH ] && continue
 		[ ${wprops["${wid}_height"]} -lt $MIN_WINDOW_HEIGHT ] && continue
 
-		if [[ "$client" == "dom0" ]] ; then
-			local vm="dom0"
-		else
-			local xprop=
-			xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" || continue #NOTE: as the window may have been closed in the meantime, we ignore errors
-
-			[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E ; }
-			local vm="${BASH_REMATCH[1]}"
+		local xprop=
+		local vm="dom0"
+		if xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" && [[ "$xprop" != *"_QUBES_VMNAME:"*"not found."* ]] ; then
+			#NOTE: as the window may have been closed in the meantime, we ignore errors
+			[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output for the window $wid: $xprop" ; B_E ; }
+			vm="${BASH_REMATCH[1]}"
 		fi
 		WIN_COUNTS["$vm"]=$(( ${WIN_COUNTS["$vm"]:-0} +1 ))
 	fi
