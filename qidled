@@ -35,7 +35,7 @@ b_import "os/qubes4/dom0"
 CONF_1="/etc/$B_SCRIPT_NAME.conf"
 CONF_2="$B_SCRIPT_DIR/$B_SCRIPT_NAME.conf"
 [ -f "$CONF_1" ] && CONF="$CONF_1" || CONF="$CONF_2"
-source "$CONF" || { B_ERR="Failed to load the configuration from $CONF. Make sure it exists at either $CONF_1 (preferred) or $CONF_2." ; B_E }
+source "$CONF" || { B_ERR="Failed to load the configuration from $CONF. Make sure it exists at either $CONF_1 (preferred) or $CONF_2." ; B_E ; }
 
 #distinguish the B_E exit code from the "normal" error
 B_RC=6
@@ -168,9 +168,9 @@ local log="$1"
 
 #files may require deletion, if too large
 local lc=
-lc="$(b_fs_getLineCount "$log")" || { B_ERR="Failed to obtain the line count of $log. Permission issues?!" ; B_E }
+lc="$(b_fs_getLineCount "$log")" || { B_ERR="Failed to obtain the line count of $log. Permission issues?!" ; B_E ; }
 if [ $lc -gt $DEBUG_LINES_MAX ] ; then
-	rm -f "$log" || { B_ERR="Failed to remove the file $log." ; B_E }
+	rm -f "$log" || { B_ERR="Failed to remove the file $log." ; B_E ; }
 fi
 
 return 0
@@ -285,7 +285,7 @@ trap '(handleUserIdle "$IDLE_EVENTS_USER"); IDLE_EVENTS_USER=$(( $IDLE_EVENTS_US
 #@StateChanging
 function initializeActiveVMs {
 local running=
-running="$(qvm-ls --running --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E }
+running="$(qvm-ls --running --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E ; }
 
 local vm=
 while b_readLine vm ; do
@@ -369,7 +369,7 @@ unset IDLE_EVENTS_VMS["$vm"]
 #@B_E
 function updateUserTimeout {
 local xidle=
-xidle="$(xssstate -i)" || { B_ERR="Failed to execute xssstate." ; B_E }
+xidle="$(xssstate -i)" || { B_ERR="Failed to execute xssstate." ; B_E ; }
 xidle=$(( $xidle / 1000 ))
 TIMEOUT_USER=$(( $USER_TIMEOUT - $xidle ))
 
@@ -410,7 +410,7 @@ for arg in "$@" ; do echo "$arg" ; done | sort -g
 function getRegex {
 local line="$1"
 local re='^[0-9]+\: (.*)$'
-[[ "$line" =~ $re ]] || { B_ERR="Could not retrieve the regex from the line $line." ; B_E }
+[[ "$line" =~ $re ]] || { B_ERR="Could not retrieve the regex from the line $line." ; B_E ; }
 echo "${BASH_REMATCH[1]}"
 }
 
@@ -445,11 +445,11 @@ for vm in "${!ACTIVE_VMS[@]}" ; do
 		#check includes
 		if [ $ignore -ne 0 ] ; then
 			local rlist=
-			rlist="$(sortArgRegexes "${!USER_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
+			rlist="$(sortArgRegexes "${!USER_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E ; }
 
 			local line=
 			while b_readLine line ; do
-				re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
+				re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E ; }
 				if [[ "$vm" =~ $re ]] ; then
 					action="${USER_IDLE["$line"]}"
 					[ $DEBUG -eq 0 ] && logInfo "handleUserIdle(): Found the action $action for the VM $vm (line: $line)..."
@@ -528,11 +528,11 @@ else
 	#check includes
 	if [ $ignore -ne 0 ] ; then
 		local rlist=
-		rlist="$(sortArgRegexes "${!VM_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E }
+		rlist="$(sortArgRegexes "${!VM_IDLE[@]}")" || { B_ERR="Failed to sort." ; B_E ; }
 
 		local line=
 		while b_readLine line ; do
-			re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E }
+			re="$(getRegex "$line")" || { B_ERR="Failed to retrieve the regex from the line $line." ; B_E ; }
 			if [[ "$vm" =~ $re ]] ; then
 				action="${VM_IDLE["$line"]}"
 				[ $DEBUG -eq 0 ] && logInfo "handleVMIdle(): Found the action $action for the VM $vm (line: $line)..."
@@ -593,7 +593,7 @@ return $ret
 #@B_E
 function updateWindowCounts {
 local out=
-out="$(b_wm_getActiveWindowProperties "wprops")" || { B_ERR="Failed to retrieve the X window properties." ; B_E }
+out="$(b_wm_getActiveWindowProperties "wprops")" || { B_ERR="Failed to retrieve the X window properties." ; B_E ; }
 eval "$out"
 
 #clear
@@ -620,7 +620,7 @@ for key in "${!wprops[@]}" ; do
 			local xprop=
 			xprop="$(xprop -id "$wid" -notype "_QUBES_VMNAME")" || continue #NOTE: as the window may have been closed in the meantime, we ignore errors
 
-			[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E }
+			[[ "$xprop" =~ $re ]] || { B_ERR="Failed to parse the following xprop output: $xprop" ; B_E ; }
 			local vm="${BASH_REMATCH[1]}"
 		fi
 		WIN_COUNTS["$vm"]=$(( ${WIN_COUNTS["$vm"]:-0} +1 ))
@@ -818,7 +818,7 @@ return 0
 #@B_E
 function unpauseAllActiveWindows {
 local paused=
-paused="$(qvm-ls --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E }
+paused="$(qvm-ls --paused -O NAME --raw-list)" || { B_ERR="Faled to execute qvm-ls." ; B_E ; }
 
 updateWindowCounts
 
@@ -864,10 +864,10 @@ b_types_assertInteger "$MIN_WINDOW_HEIGHT" "Invalid MIN_WINDOW_HEIGHT."
 #@B_E
 function assertXUser {
 local user=
-user="$(whoami)" || { B_ERR="Failed to obtain the current user." ; B_E }
+user="$(whoami)" || { B_ERR="Failed to obtain the current user." ; B_E ; }
 #NOTE: Qubes OS is a single-user system so every user != root is currently fine.
 #maybe TODO: more properly check whether the user is a X server user anyway
-[[ "$user" != "root" ]] || { B_ERR="This script must have access to the X server, but the user $user does not have access to it." ; B_E }
+[[ "$user" != "root" ]] || { B_ERR="This script must have access to the X server, but the user $user does not have access to it." ; B_E ; }
 }
 
 #toggle
@@ -926,7 +926,7 @@ case "$(b_args_get 0)" in
 		;;
 	"triggerUserIdle")
 		b_args_assertOptions
-		b_daemon_sendSignal "$DID" "SIGUSR1" || { B_ERR="Daemon not running." ; B_E }
+		b_daemon_sendSignal "$DID" "SIGUSR1" || { B_ERR="Daemon not running." ; B_E ; }
 		;;
 	"unpauseAllActiveWindows")
 		assertXUser
