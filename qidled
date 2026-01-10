@@ -414,6 +414,15 @@ local re='^[0-9]+\: (.*)$'
 echo "${BASH_REMATCH[1]}"
 }
 
+#isInternal [vm]
+#Check whether the given VM is an internal VM and should be ignored.
+#returns: A zero exit code, if it is an internal VM. Never errors out.
+function isInternal {
+local vm="$1"
+#maybe TODO: we could track this via the incoming events and only call qvm-features for VMs we don't know
+qvm-features "$vm" "internal" &> /dev/null
+}
+
 #handleUserIdle [counter]
 #Handle a "user is idle" signal.
 #[counter]: How often this function was called since the last non-idle event.
@@ -484,6 +493,13 @@ local vm="$1"
 local cnt="$2"
 
 [ -z "$action" ] && return 0
+
+#ignore internal VMs (e.g. preloaded disposables)
+if [ $EXCLUDE_INTERNAL -eq 0 ] && isInternal "$vm" ; then
+	initializeVMTimeout "$vm"
+	[ $DEBUG -eq 0 ] && logInfo "Ignoring the $atype idle action for the internal VM $vm: $action (count: $cnt)"
+	return 0
+fi
 
 logInfo "Executing the $atype idle action for the VM $vm: $action (count: $cnt)"
 local arg=
