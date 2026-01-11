@@ -84,6 +84,10 @@ declare -A COUNTERS_VMS=()
 declare -A IDLE_EVENTS_VMS=()
 IDLE_EVENTS_USER=0
 
+#internal flag per VM
+#[vm] --> 0, if an internal VM
+declare -A INTERNAL_VMS=()
+
 #action caches
 #vm --> action
 declare -A CACHED_USER_ACTIONS=()
@@ -214,6 +218,7 @@ function logState {
 if [ $DEBUG -eq 0 ] ; then
 	echo $'\n'"STATE BEGIN"
 	logInfo "$(declare -p ACTIVE_VMS)"
+	logInfo "$(declare -p INTERNAL_VMS)"
 	logInfo "$(declare -p WIN_COUNTS)"
 	logInfo "$(declare -p LAST_WIN_COUNT_CHECK)"
 	logInfo "$(declare -p TIMEOUT_USER)"
@@ -419,8 +424,16 @@ echo "${BASH_REMATCH[1]}"
 #returns: A zero exit code, if it is an internal VM. Never errors out.
 function isInternal {
 local vm="$1"
-#maybe TODO: we could track this via the incoming events and only call qvm-features for VMs we don't know
-qvm-features "$vm" "internal" &> /dev/null
+if [ ${INTERNAL_VMS["$vm"]+exists} ] ; then
+	return ${INTERNAL_VMS["$vm"]}
+else
+	#may happen for VMs that were started before qidled
+	local ret=
+	qvm-features "$vm" "internal" &> /dev/null
+	ret=$?
+	INTERNAL_VMS["$vm"]="$ret"
+	return $ret
+fi
 }
 
 #handleUserIdle [counter]
@@ -802,11 +815,19 @@ case "$eventName" in
 	"domain-unpaused")
 		ACTIVE_VMS["$vm"]=0
 		vmIdleEnabled && initializeVMTimeout "$vm"
+		[ ${INTERNAL_VMS["$vm"]+exists} ] || INTERNAL_VMS["$vm"]=1
 		;;
 	#VM stopped (triggered on shutdown & kill)
 	"domain-shutdown")
 		unset 'ACTIVE_VMS["$vm"]'
+		unset 'INTERNAL_VMS["$vm"]'
 		vmIdleEnabled && clearVMTimeout "$vm"
+		;;
+	"domain-feature-set:internal")
+		INTERNAL_VMS["$vm"]=0
+		;;
+	"domain-feature-delete:internal")
+		INTERNAL_VMS["$vm"]=1
 		;;
 	"heartbeat")
 		tickTimeouts
@@ -894,7 +915,7 @@ else
 fi
 }
 
-b_deps "date" "qvm-ls" "logger" "xssstate" "xprop" "qvm-unpause" "qvm-run" "sort"
+b_deps "date" "qvm-ls" "logger" "xssstate" "xprop" "qvm-unpause" "qvm-run" "sort" "qvm-features"
 b_args_parse "$@"
 [ "$(b_args_getCount)" -eq 1 ] || usage
 
